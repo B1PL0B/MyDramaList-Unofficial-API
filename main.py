@@ -1,8 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
+import hmac
 import logging
 import asyncio
+import os
 from scraper import MyDramaListScraper
 import time
 
@@ -95,6 +97,35 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Initialize scraper
 scraper = MyDramaListScraper()
+
+# --- Optional API key ------------------------------------------------------
+# A self-hosted deployment is a public URL, and every request it serves costs
+# the owner a scrape against MyDramaList. Setting MDL_API_KEY in the
+# environment locks /api/* behind an `x-api-key` header.
+#
+# If MDL_API_KEY is unset the guard is a no-op, so existing deployments (and
+# anyone running this locally) keep working exactly as before — the lock is
+# opt-in, not a breaking change.
+#
+# /api/health stays open on purpose: uptime checks shouldn't need a secret,
+# and it reveals nothing.
+API_KEY = os.environ.get("MDL_API_KEY", "").strip()
+OPEN_PATHS = {"/api/health"}
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    path = request.url.path
+    if API_KEY and path.startswith("/api/") and path not in OPEN_PATHS:
+        supplied = request.headers.get("x-api-key", "")
+        # compare_digest: don't leak the key one byte at a time via timing.
+        if not hmac.compare_digest(supplied, API_KEY):
+            return JSONResponse(
+                status_code=401,
+                content={"code": 401, "error": True,
+                         "description": "Missing or invalid x-api-key header"},
+            )
+    return await call_next(request)
 
 @app.get("/")
 async def root():
@@ -293,6 +324,31 @@ async def get_person_details(people_id: str):
         return person
     except Exception as e:
         logger.error(f"Error getting person details: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": 500, "error": True, "description": "Internal server error"}
+        )
+
+@app.get("/api/people/{people_id}/photos", tags=["People & Lists"],
+         summary="Get person photos",
+         description="Returns up to `limit` (default 12) full-size photos from a person's photo gallery, each with its thumbnail and gallery page URL.")
+async def get_person_photos(people_id: str, limit: int = 12):
+    """Get a person's gallery photos by slug (e.g. 15843-li-yu-jie)."""
+    try:
+        logger.info(f"Getting person photos for: {people_id}")
+        await asyncio.sleep(1)  # Rate limiting
+        # Clamp: `limit` is user input and each photo is only a URL, but an
+        # unbounded value invites a caller to ask for a person's entire gallery.
+        limit = max(1, min(limit, 60))
+        photos = await scraper.get_person_photos(people_id, limit=limit)
+        if not photos:
+            return JSONResponse(
+                status_code=404,
+                content={"code": 404, "error": True, "description": "404 Not Found"}
+            )
+        return photos
+    except Exception as e:
+        logger.error(f"Error getting person photos: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail={"code": 500, "error": True, "description": "Internal server error"}

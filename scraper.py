@@ -26,6 +26,19 @@ class MyDramaListScraper:
             self._session = AsyncSession(impersonate="chrome110")
         return self._session
 
+    # MyDramaList serves every image at several sizes, encoded as a one-letter
+    # suffix on the filename: `_3t` thumb, `_3s` small, `_3m` medium, `_3c`
+    # cropped, `_3f` full. Only the full variant is worth downloading once a
+    # user has picked a photo, so normalise any variant to `f` here rather than
+    # sprinkling the same regex through the callers. A missing/odd filename is
+    # returned untouched — better a working medium image than a broken URL.
+    @staticmethod
+    def _full_size_image(url: str) -> str:
+        if not url:
+            return ''
+        url = url.split('?', 1)[0]  # drop cache-busting query (`?v=1`)
+        return re.sub(r'_(\d+)[a-z]?(\.[A-Za-z0-9]+)$', r'_\1f\2', url)
+
     async def _make_request(self, url: str) -> BeautifulSoup:
         """Make HTTP request and return BeautifulSoup object"""
         try:
@@ -512,6 +525,10 @@ class MyDramaListScraper:
 
             img_elem = soup.select_one('.profile-image img, .box-body img.img-responsive')
             data['image'] = img_elem.get('src') or img_elem.get('data-src') or '' if img_elem else ''
+            # The profile <img> is a cropped thumbnail (`_5c`). Expose the full-size
+            # variant alongside it so callers that want to archive the photo don't have
+            # to know MDL's suffix scheme. Additive: `image` keeps its old value.
+            data['image_full'] = self._full_size_image(data['image'])
 
             # --- Personal Info from sidebar ---
             info = {}
@@ -545,8 +562,46 @@ class MyDramaListScraper:
                         entry = {}
                         entry['year'] = row.select_one('td.year').get_text(strip=True) if row.select_one('td.year') else 'N/A'
                         
-                        title_link = row.select_one('td.title a')
-                        entry['title'] = title_link.get_text(strip=True) if title_link else 'N/A'
+                        # The FIRST anchor inside `td.title` wraps the thumbnail <img>, so
+                        # `td.title a` matched it and returned empty text — that was the bug
+                        # that left every title (and every drama link) blank. The real title
+                        # anchor is the bolded one: `<b><a class="text-primary" href="/810684-...">`.
+                        # Fall back through the other places MDL keeps the name so a row that
+                        # legitimately has no link (upcoming/TBA titles) still reports a title
+                        # instead of failing the whole row.
+                        title_cell = row.select_one('td.title')
+                        title_link = title_cell.select_one('b a[href]') if title_cell else None
+                        if title_link is None and title_cell:
+                            for anchor in title_cell.select('a[href]'):
+                                if anchor.get_text(strip=True):
+                                    title_link = anchor
+                                    break
+
+                        title = ''
+                        href = ''
+                        if title_link is not None:
+                            title = title_link.get_text(strip=True) or (title_link.get('title') or '').strip()
+                            href = title_link.get('href') or ''
+                        elif title_cell is not None:
+                            # No anchor at all: take the bold heading, then the thumbnail's
+                            # alt/title attribute. Never the whole cell's text — that would
+                            # swallow the character name and the "add" button.
+                            bold = title_cell.find('b')
+                            if bold:
+                                title = bold.get_text(strip=True)
+                            if not title:
+                                thumb = title_cell.find('img')
+                                if thumb:
+                                    title = (thumb.get('alt') or thumb.get('title') or '').strip()
+
+                        entry['title'] = title
+                        # `/810684-qing-zai-hao-hao-huo-yi-ci` -> slug + absolute url, which is
+                        # what a consumer needs to look the drama up (`/api/id/{slug}`) or to
+                        # store as a stable MDL link. Guard on the leading digits so an
+                        # unrelated href (a genre or profile link) can never become a slug.
+                        slug = href.split('?', 1)[0].strip('/')
+                        entry['slug'] = slug if re.match(r'^\d+-', slug) else ''
+                        entry['url'] = f"{self.base_url}/{entry['slug']}" if entry['slug'] else ''
                         
                         role_div = row.select_one('td.role > div.name')
                         role_text_div = row.select_one('td.role > div.text-muted')
@@ -557,12 +612,77 @@ class MyDramaListScraper:
                         entry['rating'] = rating_div.get_text(strip=True) if rating_div else 'N/A'
                         
                         entries.append(entry)
-                    filmography[category] = entries
+                    # MDL renders MORE THAN ONE box under the same heading for some
+                    # people. Yang Mie Mie (id 133713) has two "Drama" boxes: the main
+                    # one with ~46 credits, then a second holding a single credit.
+                    # `filmography[category] = entries` let the later box CLOBBER the
+                    # earlier one, so the API reported 1 drama for her and silently
+                    # dropped the other 46 — the consumer had no way to tell. Merge the
+                    # boxes instead, skipping any row whose slug is already recorded for
+                    # this category so a genuine MDL repeat cannot double-count.
+                    # (Patched 2026-07-14.)
+                    bucket = filmography.setdefault(category, [])
+                    seen = {e['slug'] for e in bucket if e.get('slug')}
+                    for entry in entries:
+                        slug = entry.get('slug')
+                        if slug and slug in seen:
+                            continue
+                        if slug:
+                            seen.add(slug)
+                        bucket.append(entry)
             data['filmography'] = filmography
 
             return data
         except Exception as e:
             logger.error(f"Error parsing person details for '{people_id}': {str(e)}")
+            return None
+
+    async def get_person_photos(self, people_id: str, limit: int = 12) -> Optional[Dict[str, Any]]:
+        """Get a person's photo-gallery images (full-size URLs), newest first.
+
+        The gallery at /people/{id}/photos lays each photo out as
+        `<a class="block" href="/photos/{hash}_{n}"><img src=".../{hash}_{n}m.jpg"></a>`.
+        Anchoring the selector on that href keeps the sidebar's profile picture and the
+        site chrome out of the results. `limit` exists because some people have
+        hundreds of photos and no caller wants them all in one response.
+        """
+        photos_url = f"{self.base_url}/people/{people_id}/photos"
+        soup = await self._make_request(photos_url)
+
+        try:
+            data = {'id': people_id, 'url': photos_url}
+
+            name_elem = soup.select_one('h1.film-title')
+            data['name'] = name_elem.get_text(strip=True) if name_elem else 'N/A'
+
+            photos: List[Dict[str, str]] = []
+            seen = set()
+            for anchor in soup.select('a.block[href^="/photos/"]'):
+                img = anchor.find('img')
+                if not img:
+                    continue
+                thumb = img.get('src') or img.get('data-src') or ''
+                if not thumb:
+                    continue
+                full = self._full_size_image(thumb)
+                if full in seen:  # MDL occasionally repeats a photo across rows
+                    continue
+                seen.add(full)
+                photos.append({
+                    'image': full,
+                    'thumbnail': thumb,
+                    'page': f"{self.base_url}{anchor.get('href') or ''}",
+                })
+                if len(photos) >= limit:
+                    break
+
+            data['photos'] = photos
+            data['total'] = len(photos)
+            # An empty gallery is a valid answer, not a 404 — return the envelope so
+            # callers can tell "no photos" apart from "no such person".
+            return data
+        except Exception as e:
+            logger.error(f"Error parsing person photos for '{people_id}': {str(e)}")
             return None
 
     async def get_seasonal_dramas(self, year: int, quarter: int) -> Dict[str, Any]:
