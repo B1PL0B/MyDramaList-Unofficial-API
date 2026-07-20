@@ -1,4 +1,5 @@
 from curl_cffi.requests import AsyncSession
+from curl_cffi.requests.errors import RequestsError
 from bs4 import BeautifulSoup
 import logging
 import asyncio
@@ -7,6 +8,14 @@ import re
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
+
+class ScraperError(Exception):
+    def __init__(self, status_code: int, error_type: str, suggested_action: str, detail: str = ""):
+        self.status_code = status_code
+        self.error_type = error_type
+        self.suggested_action = suggested_action
+        self.detail = detail
+        super().__init__(detail or error_type)
 
 class MyDramaListScraper:
     def __init__(self):
@@ -41,14 +50,47 @@ class MyDramaListScraper:
 
     async def _make_request(self, url: str) -> BeautifulSoup:
         """Make HTTP request and return BeautifulSoup object"""
-        try:
-            session = await self._get_session()
-            response = await session.get(url, timeout=10)
-            response.raise_for_status()
-            return BeautifulSoup(response.content, 'html.parser')
-        except Exception as e:
-            logger.error(f"Request failed for {url}: {str(e)}")
-            raise
+        for attempt in range(1, 4):
+            try:
+                session = await self._get_session()
+                response = await session.get(url, timeout=10)
+                if response.status_code in (429, 502, 503, 504):
+                    if attempt < 3:
+                        delay = attempt
+                        logger.warning(f"Retrying {url} (attempt {attempt}/3) after {delay}s — HTTP status {response.status_code}")
+                        await asyncio.sleep(delay)
+                        continue
+                    elif response.status_code == 429:
+                        raise ScraperError(429, "rate_limited", "MyDramaList is rate-limiting requests. Try again in a few minutes.")
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
+                alert = soup.select_one('.alert-danger')
+                if (alert and 'private' in alert.get_text().lower()) or "this user's list is private." in soup.get_text().lower() or "this list is private" in soup.get_text().lower():
+                    raise ScraperError(400, "private_resource", "This resource is private and cannot be accessed.")
+                return soup
+            except ScraperError:
+                raise
+            except Exception as e:
+                status_code = getattr(getattr(e, 'response', None), 'status_code', getattr(e, 'status_code', getattr(e, 'code', None)))
+                is_retryable = (
+                    isinstance(e, RequestsError) or
+                    type(e).__name__ == "HTTPStatusError" or
+                    (status_code in (429, 502, 503, 504))
+                )
+                if attempt < 3 and is_retryable:
+                    delay = attempt
+                    logger.warning(f"Retrying {url} (attempt {attempt}/3) after {delay}s — {str(e)}")
+                    await asyncio.sleep(delay)
+                else:
+                    if status_code == 429 or "429" in str(e):
+                        raise ScraperError(429, "rate_limited", "MyDramaList is rate-limiting requests. Try again in a few minutes.")
+                    if status_code == 404 or "404" in str(e):
+                        raise ScraperError(404, "not_found", "The requested resource was not found on MyDramaList.")
+                    if "private" in str(e).lower():
+                        raise ScraperError(400, "private_resource", "This resource is private and cannot be accessed.")
+                    if attempt == 3:
+                        logger.error(f"Request failed for {url}: {str(e)}")
+                    raise
 
     async def search_dramas(self, query: str) -> Dict[str, Any]:
         """Search for dramas by query"""
@@ -116,6 +158,8 @@ class MyDramaListScraper:
         drama_url = f"{self.base_url}/{slug}"
         soup = await self._make_request(drama_url)
         
+        if not soup.select_one('h1.film-title') and not soup.select_one('div.app-body'):
+            raise ScraperError(404, "not_found", "The requested resource was not found on MyDramaList.")
 
         try:
             details = {'slug': slug, 'url': drama_url}
@@ -516,6 +560,8 @@ class MyDramaListScraper:
         person_url = f"{self.base_url}/people/{people_id}"
         soup = await self._make_request(person_url)
         
+        if not soup.select_one('h1.film-title'):
+            raise ScraperError(404, "not_found", "The requested resource was not found on MyDramaList.")
 
         try:
             data = {'id': people_id, 'url': person_url}
@@ -742,11 +788,12 @@ class MyDramaListScraper:
         list_url = f"{self.base_url}/list/{list_id}"
         soup = await self._make_request(list_url)
         
+        if soup.select_one('.alert-danger') and 'private' in soup.select_one('.alert-danger').get_text().lower():
+            raise ScraperError(400, "private_resource", "This resource is private and cannot be accessed.")
+        if not soup.find('h1') and not soup.select_one('ul.list-group'):
+            raise ScraperError(404, "not_found", "The requested resource was not found on MyDramaList.")
 
         try:
-            if soup.select_one('.alert-danger') and 'private' in soup.select_one('.alert-danger').text.lower():
-                raise Exception("This list is private")
-            
             title_elem = soup.find('h1')
             title = title_elem.get_text(strip=True) if title_elem else ''
             
@@ -786,9 +833,11 @@ class MyDramaListScraper:
                 'total': len(dramas),
                 'url': list_url
             }
+        except ScraperError:
+            raise
         except Exception as e:
             if "private" in str(e).lower():
-                raise
+                raise ScraperError(400, "private_resource", "This resource is private and cannot be accessed.")
             logger.error(f"Error parsing drama list: {str(e)}")
             return None
 
@@ -797,11 +846,12 @@ class MyDramaListScraper:
         user_list_url = f"{self.base_url}/dramalist/{user_id}"
         soup = await self._make_request(user_list_url)
         
+        if "This user's list is private." in soup.get_text() or (soup.select_one('.alert-danger') and 'private' in soup.select_one('.alert-danger').get_text().lower()):
+            raise ScraperError(400, "private_resource", "This resource is private and cannot be accessed.")
+        if not soup.select_one('h1.mdl-style-header') and not soup.find('div', class_='mdl-style-list'):
+            raise ScraperError(404, "not_found", "The requested resource was not found on MyDramaList.")
 
         try:
-            if "This user's list is private." in soup.get_text():
-                raise Exception("This list is private")
-            
             username_elem = soup.select_one('h1.mdl-style-header a')
             username = username_elem.get_text(strip=True) if username_elem else user_id
             
@@ -849,9 +899,11 @@ class MyDramaListScraper:
                 'total': len(dramas),
                 'url': user_list_url
             }
+        except ScraperError:
+            raise
         except Exception as e:
             if "private" in str(e).lower():
-                raise
+                raise ScraperError(400, "private_resource", "This resource is private and cannot be accessed.")
             logger.error(f"Error parsing user drama list: {str(e)}")
             return None
 
