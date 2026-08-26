@@ -5,7 +5,7 @@ import hmac
 import logging
 import asyncio
 import os
-from scraper import MyDramaListScraper
+from scraper import MyDramaListScraper, ScraperError
 import time
 
 # In-memory cache for calendar data
@@ -127,6 +127,17 @@ async def require_api_key(request: Request, call_next):
             )
     return await call_next(request)
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    await scraper.close()
+
+@app.exception_handler(ScraperError)
+async def scraper_error_handler(request: Request, exc: ScraperError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.status_code, "error": True, "description": exc.detail or exc.suggested_action}
+    )
+
 @app.get("/")
 async def root():
     """Redirect to static index page"""
@@ -138,221 +149,103 @@ async def root():
          description="Search MyDramaList by title. Returns up to 20 results including title, slug, year, image, rating, and URL.")
 async def search_dramas(query: str):
     """Search for dramas by title query."""
-    try:
-        logger.info(f"Searching for: {query}")
-        await asyncio.sleep(1)  # Rate limiting
-        results = await scraper.search_dramas(query)
-        return results
-    except Exception as e:
-        logger.error(f"Error searching dramas: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+    logger.info(f"Searching for: {query}")
+    await asyncio.sleep(1)  # Rate limiting
+    results = await scraper.search_dramas(query)
+    return results
 
 @app.get("/api/id/{slug}", tags=["Drama"],
          summary="Get drama details",
          description="Get full details for a drama by its slug (e.g. `58651-run-on`). Includes title, synopsis, genres, cast overview, rating, year, and more.")
 async def get_drama_details(slug: str):
     """Get drama details by slug."""
-    try:
-        logger.info(f"Getting drama details for: {slug}")
-        await asyncio.sleep(1)  # Rate limiting
-        details = await scraper.get_drama_details(slug)
-        if not details:
-            return JSONResponse(
-                status_code=404,
-                content={"code": 404, "error": True, "description": "404 Not Found"}
-            )
-        return details
-    except Exception as e:
-        logger.error(f"Error getting drama details: {str(e)}")
-        if "private" in str(e).lower():
-            return JSONResponse(
-                status_code=400,
-                content={"code": 400, "error": True, "description": {"title": "This resource is private."}}
-            )
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+    logger.info(f"Getting drama details for: {slug}")
+    await asyncio.sleep(1)  # Rate limiting
+    details = await scraper.get_drama_details(slug)
+    return details
 
 @app.get("/api/id/{slug}/cast", tags=["Drama"],
          summary="Get cast & crew",
          description="Returns cast and crew grouped by role (Main Role, Support Role, Guest Role, Director, Screenwriter, etc.).")
 async def get_drama_cast(slug: str):
     """Get cast and crew for a drama."""
-    try:
-        logger.info(f"Getting cast for: {slug}")
-        await asyncio.sleep(1)  # Rate limiting
-        cast = await scraper.get_drama_cast(slug)
-        if not cast:
-            return JSONResponse(
-                status_code=404,
-                content={"code": 404, "error": True, "description": "404 Not Found"}
-            )
-        return cast
-    except Exception as e:
-        logger.error(f"Error getting drama cast: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+    logger.info(f"Getting cast for: {slug}")
+    await asyncio.sleep(1)  # Rate limiting
+    cast = await scraper.get_drama_cast(slug)
+    return cast
 
 @app.get("/api/id/{slug}/episodes", tags=["Episodes"],
          summary="Get episode list",
          description="Returns the full episode list for a drama: episode number, title, and air date. No per-episode page visits — fast.")
 async def get_drama_episodes(slug: str):
     """Get episode list (number, title, air date) for a drama."""
-    try:
-        logger.info(f"Getting episodes for: {slug}")
-        await asyncio.sleep(1)  # Rate limiting
-        episodes = await scraper.get_drama_episodes(slug)
-        if not episodes:
-            return JSONResponse(
-                status_code=404,
-                content={"code": 404, "error": True, "description": "404 Not Found"}
-            )
-        return episodes
-    except Exception as e:
-        logger.error(f"Error getting drama episodes: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+    logger.info(f"Getting episodes for: {slug}")
+    await asyncio.sleep(1)  # Rate limiting
+    episodes = await scraper.get_drama_episodes(slug)
+    return episodes
 
 @app.get("/api/id/{slug}/episodes/all", tags=["Episodes"],
          summary="Get all episodes enriched",
          description="Fetches the episode list then **concurrently visits each episode page** (batches of 4, 0.5 s delay between batches) to retrieve description, cover image, rating, and season for every episode. Expect 5–15 s for a 16-episode drama.")
 async def get_drama_episodes_all(slug: str):
     """Get all episodes with full details — description, cover image, rating, season."""
-    try:
-        logger.info(f"Getting all episode details for: {slug}")
-        result = await scraper.get_drama_episodes_all(slug)
-        if not result:
-            return JSONResponse(
-                status_code=404,
-                content={"code": 404, "error": True, "description": "404 Not Found"}
-            )
-        return result
-    except Exception as e:
-        logger.error(f"Error getting all episode details: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+    logger.info(f"Getting all episode details for: {slug}")
+    await asyncio.sleep(1)  # Rate limiting
+    result = await scraper.get_drama_episodes_all(slug)
+    return result
 
 @app.get("/api/id/{slug}/episodes/{episode_number}", tags=["Episodes"],
          summary="Get single episode details",
          description="Visits `/{slug}/episode/{n}` on MyDramaList and returns: **title, description, cover image, air date, rating, season**. One extra HTTP request per call.")
 async def get_episode_details(slug: str, episode_number: int):
     """Get full details for a single episode by number."""
-    try:
-        logger.info(f"Getting episode {episode_number} details for: {slug}")
-        detail = await scraper.get_episode_details(slug, episode_number)
-        if not detail:
-            return JSONResponse(
-                status_code=404,
-                content={"code": 404, "error": True, "description": "404 Not Found"}
-            )
-        return detail
-    except Exception as e:
-        logger.error(f"Error getting episode details: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+    logger.info(f"Getting episode {episode_number} details for: {slug}")
+    await asyncio.sleep(1)  # Rate limiting
+    detail = await scraper.get_episode_details(slug, episode_number)
+    return detail
 
 @app.get("/api/id/{slug}/reviews", tags=["Drama"],
          summary="Get reviews",
          description="Returns up to 10 user reviews for a drama, including review text, overall score, story/acting/music/rewatch scores, author, and date.")
 async def get_drama_reviews(slug: str):
     """Get user reviews for a drama."""
-    try:
-        logger.info(f"Getting reviews for: {slug}")
-        await asyncio.sleep(1)  # Rate limiting
-        reviews = await scraper.get_drama_reviews(slug)
-        if not reviews:
-            return JSONResponse(
-                status_code=404,
-                content={"code": 404, "error": True, "description": "404 Not Found"}
-            )
-        return reviews
-    except Exception as e:
-        logger.error(f"Error getting drama reviews: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+    logger.info(f"Getting reviews for: {slug}")
+    await asyncio.sleep(1)  # Rate limiting
+    reviews = await scraper.get_drama_reviews(slug)
+    return reviews
 
 @app.get("/api/id/{slug}/recs", tags=["Drama"],
          summary="Get recommendations",
          description="Returns drama recommendations for a given drama, including the recommended title, reasons given by users, vote count, and recommender username.")
 async def get_drama_recommendations(slug: str):
     """Get drama recommendations with reasons and votes."""
-    try:
-        logger.info(f"Getting recommendations for: {slug}")
-        await asyncio.sleep(1)  # Rate limiting
-        recs = await scraper.get_drama_recommendations(slug)
-        if not recs:
-            return JSONResponse(
-                status_code=404,
-                content={"code": 404, "error": True, "description": "404 Not Found"}
-            )
-        return recs
-    except Exception as e:
-        logger.error(f"Error getting drama recommendations: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+    logger.info(f"Getting recommendations for: {slug}")
+    await asyncio.sleep(1)  # Rate limiting
+    recs = await scraper.get_drama_recommendations(slug)
+    return recs
 
 @app.get("/api/people/{people_id}", tags=["People & Lists"],
          summary="Get person details",
          description="Returns biography, birthday, nationality, filmography, and social links for an actor/director/crew member. Use the slug from their MDL profile URL (e.g. `14472-song-kang`).")
 async def get_person_details(people_id: str):
     """Get person details by slug (e.g. 14472-song-kang)."""
-    try:
-        logger.info(f"Getting person details for: {people_id}")
-        await asyncio.sleep(1)  # Rate limiting
-        person = await scraper.get_person_details(people_id)
-        if not person:
-            return JSONResponse(
-                status_code=404,
-                content={"code": 404, "error": True, "description": "404 Not Found"}
-            )
-        return person
-    except Exception as e:
-        logger.error(f"Error getting person details: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+    logger.info(f"Getting person details for: {people_id}")
+    await asyncio.sleep(1)  # Rate limiting
+    person = await scraper.get_person_details(people_id)
+    return person
 
 @app.get("/api/people/{people_id}/photos", tags=["People & Lists"],
          summary="Get person photos",
          description="Returns up to `limit` (default 12) full-size photos from a person's photo gallery, each with its thumbnail and gallery page URL.")
 async def get_person_photos(people_id: str, limit: int = 12):
     """Get a person's gallery photos by slug (e.g. 15843-li-yu-jie)."""
-    try:
-        logger.info(f"Getting person photos for: {people_id}")
-        await asyncio.sleep(1)  # Rate limiting
-        # Clamp: `limit` is user input and each photo is only a URL, but an
-        # unbounded value invites a caller to ask for a person's entire gallery.
-        limit = max(1, min(limit, 60))
-        photos = await scraper.get_person_photos(people_id, limit=limit)
-        if not photos:
-            return JSONResponse(
-                status_code=404,
-                content={"code": 404, "error": True, "description": "404 Not Found"}
-            )
-        return photos
-    except Exception as e:
-        logger.error(f"Error getting person photos: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+    logger.info(f"Getting person photos for: {people_id}")
+    await asyncio.sleep(1)  # Rate limiting
+    # Clamp: `limit` is user input and each photo is only a URL, but an
+    # unbounded value invites a caller to ask for a person's entire gallery.
+    limit = max(1, min(limit, 60))
+    photos = await scraper.get_person_photos(people_id, limit=limit)
+    return photos
 
 @app.get("/api/seasonal/{year}/{quarter}", tags=["People & Lists"],
          summary="Get seasonal dramas",
@@ -372,104 +265,52 @@ async def get_seasonal_dramas(year: int, quarter: int):
         return dramas
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Error getting seasonal dramas: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
 
 @app.get("/api/list/{list_id}", tags=["People & Lists"],
          summary="Get drama list",
          description="Returns all dramas in a user-created public MDL list. Returns 400 if the list is private. Use the numeric list ID from the MDL list URL.")
 async def get_drama_list(list_id: str):
     """Get dramas in a public MDL list by list ID."""
-    try:
-        logger.info(f"Getting drama list: {list_id}")
-        await asyncio.sleep(1)  # Rate limiting
-        drama_list = await scraper.get_drama_list(list_id)
-        if not drama_list:
-            return JSONResponse(
-                status_code=404,
-                content={"code": 404, "error": True, "description": "404 Not Found"}
-            )
-        return drama_list
-    except Exception as e:
-        logger.error(f"Error getting drama list: {str(e)}")
-        if "private" in str(e).lower():
-            return JSONResponse(
-                status_code=400,
-                content={"code": 400, "error": True, "description": {"title": "This list is private."}}
-            )
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+    logger.info(f"Getting drama list: {list_id}")
+    await asyncio.sleep(1)  # Rate limiting
+    drama_list = await scraper.get_drama_list(list_id)
+    return drama_list
 
 @app.get("/api/dramalist/{user_id}", tags=["People & Lists"],
          summary="Get user watchlist",
          description="Returns a user's public drama watchlist. Returns 400 if the watchlist is private. Use the MDL username or user ID.")
 async def get_user_drama_list(user_id: str):
     """Get a user's public watchlist by user ID or username."""
-    try:
-        logger.info(f"Getting user drama list for: {user_id}")
-        await asyncio.sleep(1)  # Rate limiting
-        user_list = await scraper.get_user_drama_list(user_id)
-        if not user_list:
-            return JSONResponse(
-                status_code=404,
-                content={"code": 404, "error": True, "description": "404 Not Found"}
-            )
-        return user_list
-    except Exception as e:
-        logger.error(f"Error getting user drama list: {str(e)}")
-        if "private" in str(e).lower():
-            return JSONResponse(
-                status_code=400,
-                content={"code": 400, "error": True, "description": {"title": "This list is private."}}
-            )
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+    logger.info(f"Getting user drama list for: {user_id}")
+    await asyncio.sleep(1)  # Rate limiting
+    user_list = await scraper.get_user_drama_list(user_id)
+    return user_list
 
 @app.get("/api/calendar", tags=["Calendar"],
          summary="Get airing calendar",
          description="Returns currently airing dramas grouped by day of the week (Monday-Sunday).")
 async def get_airing_calendar():
     """Get currently airing dramas from the calendar."""
-    try:
-        logger.info("Getting airing calendar")
-        await asyncio.sleep(1)  # Rate limiting
+    logger.info("Getting airing calendar")
 
-        now = time.time()
-        if _calendar_cache["data"] is not None and (now - _calendar_cache["timestamp"]) < _calendar_cache["ttl_seconds"]:
-            # Return cached data, add cache hit header
-            response = JSONResponse(content=_calendar_cache["data"])
-            response.headers["X-Cache"] = "HIT"
-            response.headers["X-Cache-Age"] = str(int(now - _calendar_cache["timestamp"])) + "s"
-            return response
-
-        calendar_data = await scraper.get_airing_calendar()
-        if not calendar_data:
-            return JSONResponse(
-                status_code=404,
-                content={"code": 404, "error": True, "description": "404 Not Found"}
-            )
-
-        # Store in cache
-        _calendar_cache["data"] = calendar_data
-        _calendar_cache["timestamp"] = now
-
-        response = JSONResponse(content=calendar_data)
-        response.headers["X-Cache"] = "MISS"
+    now = time.time()
+    if _calendar_cache["data"] is not None and (now - _calendar_cache["timestamp"]) < _calendar_cache["ttl_seconds"]:
+        # Return cached data, add cache hit header
+        response = JSONResponse(content=_calendar_cache["data"])
+        response.headers["X-Cache"] = "HIT"
+        response.headers["X-Cache-Age"] = str(int(now - _calendar_cache["timestamp"])) + "s"
         return response
-    except Exception as e:
-        logger.error(f"Error getting airing calendar: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={"code": 500, "error": True, "description": "Internal server error"}
-        )
+
+    await asyncio.sleep(1)  # Rate limiting
+    calendar_data = await scraper.get_airing_calendar()
+
+    # Store in cache
+    _calendar_cache["data"] = calendar_data
+    _calendar_cache["timestamp"] = now
+
+    response = JSONResponse(content=calendar_data)
+    response.headers["X-Cache"] = "MISS"
+    return response
 
 # Health check endpoint
 @app.get("/api/health", tags=["Utility"], summary="Health check")

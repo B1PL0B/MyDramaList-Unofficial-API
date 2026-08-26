@@ -29,6 +29,12 @@ class MyDramaListScraper:
             'Upgrade-Insecure-Requests': '1',
         }
         self._session = None
+        self._episode_semaphore = asyncio.Semaphore(4)
+
+    async def close(self):
+        if self._session:
+            await self._session.close()
+            self._session = None
 
     async def _get_session(self) -> AsyncSession:
         if self._session is None:
@@ -468,22 +474,24 @@ class MyDramaListScraper:
             # Step 2: Concurrently fetch each episode detail page
             async def fetch_detail(ep: Dict[str, Any]) -> Dict[str, Any]:
                 try:
-                    n = int(ep['episode_number'])
-                    detail = await self.get_episode_details(slug, n)
-                    if detail:
-                        # Merge: prefer base title if detail title is generic
-                        ep['description'] = detail.get('description', '')
-                        ep['image'] = detail.get('image', '')
-                        ep['rating'] = detail.get('rating', '')
-                        ep['season'] = detail.get('season', '')
-                        # Use air_date from detail page if base is empty
-                        if not ep.get('air_date') and detail.get('air_date'):
-                            ep['air_date'] = detail['air_date']
-                    else:
-                        ep['description'] = ''
-                        ep['image'] = ''
-                        ep['rating'] = ''
-                        ep['season'] = ''
+                    async with self._episode_semaphore:
+                        await asyncio.sleep(0.25)
+                        n = int(ep['episode_number'])
+                        detail = await self.get_episode_details(slug, n)
+                        if detail:
+                            # Merge: prefer base title if detail title is generic
+                            ep['description'] = detail.get('description', '')
+                            ep['image'] = detail.get('image', '')
+                            ep['rating'] = detail.get('rating', '')
+                            ep['season'] = detail.get('season', '')
+                            # Use air_date from detail page if base is empty
+                            if not ep.get('air_date') and detail.get('air_date'):
+                                ep['air_date'] = detail['air_date']
+                        else:
+                            ep['description'] = ''
+                            ep['image'] = ''
+                            ep['rating'] = ''
+                            ep['season'] = ''
                 except Exception as e:
                     logger.error(f"Error fetching detail for episode {ep.get('episode_number')}: {str(e)}")
                     ep['description'] = ''
@@ -492,15 +500,18 @@ class MyDramaListScraper:
                     ep['season'] = ''
                 return ep
 
-            # Stagger requests slightly to avoid rate limiting (batch of 4 at a time)
+            results = await asyncio.gather(*[fetch_detail(ep) for ep in base_episodes], return_exceptions=True)
             enriched_episodes = []
-            batch_size = 4
-            for i in range(0, len(base_episodes), batch_size):
-                batch = base_episodes[i:i + batch_size]
-                results = await asyncio.gather(*[fetch_detail(ep) for ep in batch])
-                enriched_episodes.extend(results)
-                if i + batch_size < len(base_episodes):
-                    await asyncio.sleep(0.5)  # Brief pause between batches
+            for ep, result in zip(base_episodes, results):
+                if isinstance(result, Exception):
+                    logger.error(f"Error fetching detail for episode {ep.get('episode_number')}: {str(result)}")
+                    ep['description'] = ''
+                    ep['image'] = ''
+                    ep['rating'] = ''
+                    ep['season'] = ''
+                    enriched_episodes.append(ep)
+                else:
+                    enriched_episodes.append(result)
 
             return {
                 'episodes': enriched_episodes,
@@ -508,7 +519,7 @@ class MyDramaListScraper:
             }
         except Exception as e:
             logger.error(f"Error in get_drama_episodes_all for '{slug}': {str(e)}")
-            return None
+            raise
 
     async def get_drama_reviews(self, slug: str) -> Optional[Dict[str, Any]]:
         """Get reviews for a drama by slug (or title)"""
@@ -681,7 +692,7 @@ class MyDramaListScraper:
             return data
         except Exception as e:
             logger.error(f"Error parsing person details for '{people_id}': {str(e)}")
-            return None
+            raise
 
     async def get_person_photos(self, people_id: str, limit: int = 12) -> Optional[Dict[str, Any]]:
         """Get a person's photo-gallery images (full-size URLs), newest first.
@@ -729,7 +740,7 @@ class MyDramaListScraper:
             return data
         except Exception as e:
             logger.error(f"Error parsing person photos for '{people_id}': {str(e)}")
-            return None
+            raise
 
     async def get_seasonal_dramas(self, year: int, quarter: int) -> Dict[str, Any]:
         """Get seasonal dramas"""
@@ -781,15 +792,13 @@ class MyDramaListScraper:
             }
         except Exception as e:
             logger.error(f"Error parsing seasonal dramas: {str(e)}")
-            return {"dramas": [], "total": 0, "year": year, "quarter": quarter}
+            raise
 
     async def get_drama_list(self, list_id: str) -> Optional[Dict[str, Any]]:
         """Get a specific drama list by ID"""
         list_url = f"{self.base_url}/list/{list_id}"
         soup = await self._make_request(list_url)
         
-        if soup.select_one('.alert-danger') and 'private' in soup.select_one('.alert-danger').get_text().lower():
-            raise ScraperError(400, "private_resource", "This resource is private and cannot be accessed.")
         if not soup.find('h1') and not soup.select_one('ul.list-group'):
             raise ScraperError(404, "not_found", "The requested resource was not found on MyDramaList.")
 
@@ -839,15 +848,13 @@ class MyDramaListScraper:
             if "private" in str(e).lower():
                 raise ScraperError(400, "private_resource", "This resource is private and cannot be accessed.")
             logger.error(f"Error parsing drama list: {str(e)}")
-            return None
+            raise
 
     async def get_user_drama_list(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Get a user's drama list by user ID"""
         user_list_url = f"{self.base_url}/dramalist/{user_id}"
         soup = await self._make_request(user_list_url)
         
-        if "This user's list is private." in soup.get_text() or (soup.select_one('.alert-danger') and 'private' in soup.select_one('.alert-danger').get_text().lower()):
-            raise ScraperError(400, "private_resource", "This resource is private and cannot be accessed.")
         if not soup.select_one('h1.mdl-style-header') and not soup.find('div', class_='mdl-style-list'):
             raise ScraperError(404, "not_found", "The requested resource was not found on MyDramaList.")
 
@@ -905,7 +912,7 @@ class MyDramaListScraper:
             if "private" in str(e).lower():
                 raise ScraperError(400, "private_resource", "This resource is private and cannot be accessed.")
             logger.error(f"Error parsing user drama list: {str(e)}")
-            return None
+            raise
 
     async def get_drama_recommendations(self, slug: str) -> Optional[Dict[str, Any]]:
         """Get recommendations for a specific drama by slug (or title) with optimized parsing and pagination"""
@@ -947,7 +954,7 @@ class MyDramaListScraper:
 
                     # --- IMAGE ---
                     img_elem = item.select_one("img")
-                    image = img_elem.get("data-src") or img_elem.get("src") if img_elem else ""
+                    image = (img_elem.get("data-src") or img_elem.get("src") or "") if img_elem else ""
 
                     # --- RATING ---
                     rating_elem = item.select_one(".score")
@@ -1118,4 +1125,4 @@ class MyDramaListScraper:
             }
         except Exception as e:
             logger.error(f"Error parsing airing calendar: {str(e)}")
-            return None
+            raise
