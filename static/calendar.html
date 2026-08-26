@@ -44,6 +44,131 @@
         .drama-card:hover .drama-poster-container img {
             transform: scale(1.05);
         }
+
+        /* ── Filter Panel ── */
+        #filter-panel {
+            position: absolute;
+            top: calc(100% + 8px);
+            right: 0;
+            width: 420px;
+            max-width: calc(100vw - 32px);
+            background: #0f172a;
+            border: 1px solid #1e293b;
+            border-radius: 16px;
+            box-shadow: 0 25px 60px rgba(0,0,0,0.6), 0 0 0 1px rgba(34,211,238,0.06);
+            padding: 24px;
+            z-index: 100;
+            opacity: 0;
+            transform: translateY(-8px) scale(0.97);
+            pointer-events: none;
+            transition: opacity 0.2s ease, transform 0.2s ease;
+        }
+        #filter-panel.open {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+            pointer-events: auto;
+        }
+        .filter-section-title {
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: #94a3b8;
+            margin-bottom: 12px;
+        }
+        .filter-checkbox-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px 16px;
+            margin-bottom: 20px;
+        }
+        .filter-checkbox-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .filter-checkbox-item input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: #06b6d4;
+            cursor: pointer;
+            border-radius: 4px;
+            flex-shrink: 0;
+        }
+        .filter-checkbox-item span {
+            font-size: 0.875rem;
+            color: #cbd5e1;
+            transition: color 0.15s;
+        }
+        .filter-checkbox-item:hover span { color: #f1f5f9; }
+        .filter-divider {
+            border: none;
+            border-top: 1px solid #1e293b;
+            margin: 4px 0 20px;
+        }
+        #filter-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 10px;
+            background: #0f172a;
+            border: 1px solid #1e293b;
+            color: #94a3b8;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: border-color 0.2s, color 0.2s, background 0.2s;
+        }
+        #filter-btn:hover, #filter-btn.active {
+            border-color: #06b6d4;
+            color: #22d3ee;
+            background: rgba(6,182,212,0.08);
+        }
+        #filter-btn svg { flex-shrink: 0; }
+        .filter-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-top: 4px;
+        }
+        #filter-clear-btn {
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #06b6d4;
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 0;
+            transition: color 0.2s;
+        }
+        #filter-clear-btn:hover { color: #22d3ee; }
+        #filter-apply-btn {
+            padding: 9px 22px;
+            border-radius: 8px;
+            background: #0891b2;
+            color: #fff;
+            font-size: 0.875rem;
+            font-weight: 600;
+            border: none;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+        }
+        #filter-apply-btn:hover { background: #06b6d4; }
+        #filter-apply-btn:active { transform: scale(0.97); }
+        #filter-count-badge {
+            display: none;
+            background: #06b6d4;
+            color: #020617;
+            border-radius: 999px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            padding: 1px 6px;
+            min-width: 18px;
+            text-align: center;
+        }
     </style>
 </head>
 <body class="text-slate-300">
@@ -76,7 +201,7 @@
 
     <main class="container mx-auto px-6 py-12 max-w-7xl">
         <!-- Hero Section -->
-        <section class="hero-bg text-center mb-16">
+        <section class="hero-bg text-center mb-8">
             <h1 class="text-4xl md:text-5xl font-bold mb-4 bg-gradient-to-br from-white to-slate-400 text-transparent bg-clip-text">
                 Currently Airing
             </h1>
@@ -96,6 +221,105 @@
         <!-- Error Banner -->
         <div id="error-banner" class="hidden mb-8 p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-center font-medium">
             ⚠️ Failed to load calendar data. Is the API running?
+        </div>
+
+        <!-- Day Title + Filter Bar -->
+        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4 relative" id="filter-bar">
+            <div>
+                <p id="current-day-subtitle" class="text-xs font-semibold uppercase tracking-wider text-cyan-400 mb-1"></p>
+                <h2 id="current-day-title" class="text-2xl sm:text-3xl font-bold text-white"></h2>
+            </div>
+            <div class="flex items-center gap-3 self-end sm:self-center">
+                <button id="filter-btn" aria-label="Toggle filters" onclick="toggleFilterPanel()">
+                    <!-- Sliders icon -->
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="4" y1="6" x2="20" y2="6"/>
+                        <line x1="4" y1="12" x2="20" y2="12"/>
+                        <line x1="4" y1="18" x2="20" y2="18"/>
+                        <circle cx="8" cy="6" r="2" fill="currentColor" stroke="none"/>
+                        <circle cx="16" cy="12" r="2" fill="currentColor" stroke="none"/>
+                        <circle cx="10" cy="18" r="2" fill="currentColor" stroke="none"/>
+                    </svg>
+                    Filters
+                    <span id="filter-count-badge"></span>
+                </button>
+            </div>
+
+            <!-- Filter Dropdown Panel -->
+            <div id="filter-panel" role="dialog" aria-label="Filter options">
+                <!-- Country -->
+                <p class="filter-section-title">Country</p>
+                <div class="filter-checkbox-grid">
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="country-all" name="country" value="all" checked onchange="handleCountryAll(this)">
+                        <span>All</span>
+                    </label>
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="country-japan" name="country" value="Japan" onchange="handleCountryOption(this)">
+                        <span>Japan</span>
+                    </label>
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="country-china" name="country" value="China" onchange="handleCountryOption(this)">
+                        <span>China</span>
+                    </label>
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="country-south-korea" name="country" value="South Korea" onchange="handleCountryOption(this)">
+                        <span>South Korea</span>
+                    </label>
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="country-hong-kong" name="country" value="Hong Kong" onchange="handleCountryOption(this)">
+                        <span>Hong Kong</span>
+                    </label>
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="country-taiwan" name="country" value="Taiwan" onchange="handleCountryOption(this)">
+                        <span>Taiwan</span>
+                    </label>
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="country-thailand" name="country" value="Thailand" onchange="handleCountryOption(this)">
+                        <span>Thailand</span>
+                    </label>
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="country-philippines" name="country" value="Philippines" onchange="handleCountryOption(this)">
+                        <span>Philippines</span>
+                    </label>
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="country-singapore" name="country" value="Singapore" onchange="handleCountryOption(this)">
+                        <span>Singapore</span>
+                    </label>
+                </div>
+
+                <hr class="filter-divider">
+
+                <!-- Content Type -->
+                <p class="filter-section-title">Content Type</p>
+                <div class="filter-checkbox-grid">
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="type-all" name="type" value="all" checked onchange="handleTypeAll(this)">
+                        <span>All</span>
+                    </label>
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="type-movie" name="type" value="Movie" onchange="handleTypeOption(this)">
+                        <span>Movie</span>
+                    </label>
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="type-drama" name="type" value="Drama" onchange="handleTypeOption(this)">
+                        <span>Drama</span>
+                    </label>
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="type-tvshow" name="type" value="TV Show" onchange="handleTypeOption(this)">
+                        <span>TV Show</span>
+                    </label>
+                    <label class="filter-checkbox-item">
+                        <input type="checkbox" id="type-special" name="type" value="Special" onchange="handleTypeOption(this)">
+                        <span>Special</span>
+                    </label>
+                </div>
+
+                <div class="filter-actions">
+                    <button id="filter-clear-btn" onclick="clearFilters()">Clear</button>
+                    <button id="filter-apply-btn" onclick="applyFilters()">Apply</button>
+                </div>
+            </div>
         </div>
 
         <!-- Content Area -->
@@ -128,6 +352,123 @@
         const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
         let calendarData = null;
         let currentDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+
+        // ── Active Filters State ──
+        let activeFilters = { countries: [], types: [] }; // empty = All
+
+        // ── Country keyword map (checks drama.network field) ──
+        const COUNTRY_KEYWORDS = {
+            'Japan':       ['japan', 'japanese', 'tokyo', 'asia/tokyo'],
+            'South Korea': ['korea', 'korean', 'seoul', 'asia/seoul'],
+            'China':       ['china', 'chinese', 'shanghai', 'asia/shanghai', 'mainland', 'beijing'],
+            'Hong Kong':   ['hong kong', 'hong_kong', 'asia/hong_kong'],
+            'Taiwan':      ['taiwan', 'taipei', 'asia/taipei'],
+            'Thailand':    ['thailand', 'thai', 'bangkok', 'asia/bangkok'],
+            'Philippines': ['philippines', 'filipino', 'manila', 'asia/manila'],
+            'Singapore':   ['singapore', 'asia/singapore'],
+        };
+
+        function detectCountry(drama) {
+            const haystack = ((drama.network || '') + ' ' + (drama.country || '')).toLowerCase();
+            for (const [country, kws] of Object.entries(COUNTRY_KEYWORDS)) {
+                if (kws.some(kw => haystack.includes(kw))) return country;
+            }
+            return 'Other';
+        }
+
+        function detectType(drama) {
+            if (drama.type) return drama.type;
+            if (drama.content_type) return drama.content_type;
+            const raw = ((drama.title || '') + ' ' + (drama.episode || '')).toLowerCase();
+            if (raw.includes('movie') || raw.includes('film')) return 'Movie';
+            if (raw.includes('special') || raw.includes('sp ') || raw.endsWith('sp')) return 'Special';
+            if (raw.includes('tv show') || raw.includes('variety') || raw.includes('treasure hunt') || raw.includes('lake:') || raw.includes('camp')) return 'TV Show';
+            return 'Drama';
+        }
+
+        function filterDramas(dramas) {
+            return dramas.filter(d => {
+                const countryOk = activeFilters.countries.length === 0 ||
+                    activeFilters.countries.includes(detectCountry(d));
+                const typeOk = activeFilters.types.length === 0 ||
+                    activeFilters.types.includes(detectType(d));
+                return countryOk && typeOk;
+            });
+        }
+
+        // ── Filter Panel UI ──
+        function toggleFilterPanel() {
+            const panel = document.getElementById('filter-panel');
+            const btn   = document.getElementById('filter-btn');
+            const isOpen = panel.classList.contains('open');
+            panel.classList.toggle('open', !isOpen);
+            btn.classList.toggle('active', !isOpen);
+        }
+
+        // Close when clicking outside
+        document.addEventListener('click', e => {
+            const panel = document.getElementById('filter-panel');
+            const bar   = document.getElementById('filter-bar');
+            if (panel && bar && !bar.contains(e.target)) {
+                panel.classList.remove('open');
+                document.getElementById('filter-btn').classList.remove('active');
+            }
+        });
+
+        function handleCountryAll(cb) {
+            if (cb.checked) {
+                document.querySelectorAll('input[name="country"]').forEach(c => { if (c.value !== 'all') c.checked = false; });
+            }
+        }
+        function handleCountryOption(cb) {
+            document.getElementById('country-all').checked = false;
+            if (!document.querySelectorAll('input[name="country"]:not(#country-all):checked').length) {
+                document.getElementById('country-all').checked = true;
+            }
+        }
+        function handleTypeAll(cb) {
+            if (cb.checked) {
+                document.querySelectorAll('input[name="type"]').forEach(c => { if (c.value !== 'all') c.checked = false; });
+            }
+        }
+        function handleTypeOption(cb) {
+            document.getElementById('type-all').checked = false;
+            if (!document.querySelectorAll('input[name="type"]:not(#type-all):checked').length) {
+                document.getElementById('type-all').checked = true;
+            }
+        }
+
+        function applyFilters() {
+            const countryAll = document.getElementById('country-all').checked;
+            const typeAll    = document.getElementById('type-all').checked;
+
+            activeFilters.countries = countryAll ? [] :
+                [...document.querySelectorAll('input[name="country"]:not(#country-all):checked')].map(c => c.value);
+            activeFilters.types = typeAll ? [] :
+                [...document.querySelectorAll('input[name="type"]:not(#type-all):checked')].map(c => c.value);
+
+            // Update badge count
+            const total = activeFilters.countries.length + activeFilters.types.length;
+            const badge = document.getElementById('filter-count-badge');
+            if (total > 0) {
+                badge.textContent = total;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
+
+            document.getElementById('filter-panel').classList.remove('open');
+            document.getElementById('filter-btn').classList.remove('active');
+            renderGrid(currentDay);
+        }
+
+        function clearFilters() {
+            document.querySelectorAll('input[name="country"]').forEach(c => c.checked = (c.value === 'all'));
+            document.querySelectorAll('input[name="type"]').forEach(c => c.checked = (c.value === 'all'));
+            activeFilters = { countries: [], types: [] };
+            document.getElementById('filter-count-badge').style.display = 'none';
+            renderGrid(currentDay);
+        }
 
         function getWeekDates() {
             const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -238,11 +579,15 @@
                 return;
             }
 
-            const dramas = calendarData.days[day];
+            const allDramas = calendarData.days[day];
+            const dramas = filterDramas(allDramas);
             
             if (dramas.length === 0) {
                 dramaGrid.classList.add('hidden');
-                emptyMessage.textContent = `No dramas scheduled for ${day}.`;
+                const hasFilters = activeFilters.countries.length > 0 || activeFilters.types.length > 0;
+                emptyMessage.textContent = hasFilters
+                    ? `No dramas match the current filters for ${day}.`
+                    : `No dramas scheduled for ${day}.`;
                 emptyState.classList.remove('hidden');
                 emptyState.classList.add('flex');
                 return;
@@ -290,15 +635,26 @@
             `).join('');
         }
 
+        function updateDayHeader(day) {
+            const titleEl = document.getElementById('current-day-title');
+            const subtitleEl = document.getElementById('current-day-subtitle');
+            if (titleEl && subtitleEl && weekDates[day]) {
+                titleEl.textContent = day;
+                subtitleEl.textContent = weekDates[day].fullDate;
+            }
+        }
+
         window.switchDay = function(day) {
             currentDay = day;
             renderTabs();
+            updateDayHeader(day);
             renderGrid(day);
         };
 
         async function fetchCalendar() {
             initSkeletons();
             renderTabs(); // Render initial tabs state
+            updateDayHeader(currentDay);
             
             try {
                 const cached = sessionStorage.getItem('mdl_calendar');
